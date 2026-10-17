@@ -42,3 +42,19 @@ Nếu gặp 502 Bad Gateway sau khi tạo lại container: `docker compose resta
 - Container chạy với `no-new-privileges` (trừ cadvisor và promtail)
 - Mật khẩu nằm trong `.env`, không đưa lên Git
 - Cổng phpMyAdmin (8082), Prometheus (9090), Grafana (3000) publish ra host cho mục đích lab
+
+## Truy vấn LogQL
+
+Mở Grafana (`http://<SERVER_IP>:3000`), vào Explore, chọn nguồn dữ liệu Loki. Promtail gắn nhãn `container` và `service` cho log của mọi container.
+
+**Truy vấn 1: toàn bộ access log của Nginx**
+
+    {container="nginx"}
+
+**Truy vấn 2: các request Nginx trả lỗi 4xx và 5xx**
+
+    {container="nginx"} |~ "\" [45][0-9]{2} "
+
+**Truy vấn 3: số dòng log của từng container trong 5 phút**
+
+    sum by (container) (count_over_time({container=~".+"}[5m]))
