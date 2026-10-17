@@ -2,6 +2,8 @@ services:
   mysql:
     image: mysql:8.0
     container_name: mysql
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
@@ -23,6 +25,8 @@ services:
   wordpress:
     image: wordpress:6.6.1-php8.3-apache
     container_name: wordpress
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     depends_on:
       mysql:
@@ -131,6 +135,8 @@ services:
   node-exporter:
     image: prom/node-exporter:latest
     container_name: node-exporter
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     volumes:
       - /proc:/host/proc:ro
@@ -176,6 +182,33 @@ services:
     depends_on:
       - wordpress
 
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: loki
+    restart: unless-stopped
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    command:
+      - "-config.file=/etc/loki/loki-config.yaml"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - monitoring
+  promtail:
+    image: grafana/promtail:2.9.8
+    container_name: promtail
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+    command:
+      - "-config.file=/etc/promtail/config.yml"
+    networks:
+      - monitoring
+    depends_on:
+      - loki
 networks:
   app-network:
     driver: bridge
