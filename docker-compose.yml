@@ -1,41 +1,62 @@
-services:
-  mysql:
-    image: mysql:8.0
-    container_name: mysql
-    security_opt:
-      - no-new-privileges:true
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_ROOT_HOST: localhost
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-    volumes:
-      - mysql_data:/var/lib/mysql
-    networks:
-      - app-network
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p${MYSQL_ROOT_PASSWORD} --silent"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
+# =====================================================================
+# ĐỀ 3 - WEBSITE QUẢNG BÁ SẢN PHẨM (WordPress, Nginx, Prometheus/Grafana, Loki)
+# Tổng cộng 12 container, chia làm 2 mạng Docker:
+#   - app-network : nhóm ứng dụng (nginx, wordpress, mysql, phpmyadmin)
+#   - monitoring  : nhóm giám sát và log (prometheus, grafana, loki, ...)
+# Các biến ${...} được đọc từ file .env (file này không đưa lên GitHub)
+# =====================================================================
 
+services:
+
+  # ===================================================================
+  # NHÓM 1: ỨNG DỤNG WEB VÀ CƠ SỞ DỮ LIỆU
+  # ===================================================================
+
+  # ---- MySQL: cơ sở dữ liệu của WordPress ----
+  mysql:
+    image: mysql:8.0                      # Image MySQL phiên bản 8.0
+    container_name: mysql                 # Đặt tên cố định để các service gọi nhau bằng tên "mysql"
+    security_opt:
+      - no-new-privileges:true            # [Hardening] Chặn tiến trình con leo thang đặc quyền (SUID/SGID)
+    restart: unless-stopped               # Tự khởi động lại khi lỗi hoặc khi reboot máy (trừ khi tự tay stop)
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}   # Mật khẩu root, lấy từ .env
+      MYSQL_ROOT_HOST: localhost          # [Hardening] Root chỉ được đăng nhập từ trong container (localhost)
+      MYSQL_DATABASE: ${MYSQL_DATABASE}   # Tự tạo CSDL cho WordPress khi khởi động lần đầu
+      MYSQL_USER: ${MYSQL_USER}           # Tài khoản riêng cho WordPress (wp_user)
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}   # Mật khẩu của wp_user
+    volumes:
+      - mysql_data:/var/lib/mysql         # Volume lưu dữ liệu, giữ nguyên khi xóa hoặc cập nhật container
+    networks:
+      - app-network                       # Chỉ nằm trong mạng ứng dụng
+    # [Hardening] Không khai báo "ports" -> cổng 3306 KHÔNG mở ra máy host
+    healthcheck:                          # Kiểm tra sức khỏe, để wordpress chỉ chạy khi MySQL đã sẵn sàng
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 10s                       # Kiểm tra mỗi 10 giây
+      timeout: 5s                         # Quá 5 giây không trả lời thì tính là lỗi
+      retries: 10                         # Cho phép lỗi tối đa 10 lần liên tiếp
+      start_period: 30s                   # Thời gian chờ khởi động, 30 giây đầu chưa tính lỗi
+
+  # ---- WordPress: máy chủ ứng dụng PHP của website ----
   wordpress:
-    image: wordpress:6.6.1-php8.3-apache
+    image: wordpress:6.6.1-php8.3-apache  # WordPress 6.6.1, PHP 8.3, web server Apache
     container_name: wordpress
     security_opt:
-      - no-new-privileges:true
+      - no-new-privileges:true            # [Hardening] Chặn leo thang đặc quyền
     restart: unless-stopped
     depends_on:
       mysql:
-        condition: service_healthy
+        condition: service_healthy        # Chỉ khởi động khi MySQL đã báo "healthy"
     environment:
-      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_HOST: mysql:3306       # Kết nối MySQL bằng tên service qua DNS nội bộ của Docker
       WORDPRESS_DB_USER: ${MYSQL_USER}
       WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD}
       WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
+      # Đoạn PHP bên dưới được chèn vào wp-config.php:
+      #  - WP_HOME, WP_SITEURL: ép WordPress dùng địa chỉ https://IP của server
+      #  - Nếu Nginx gửi header X-Forwarded-Proto = https thì đặt HTTPS = on,
+      #    tránh lỗi ERR_TOO_MANY_REDIRECTS khi chạy sau reverse proxy
+      #  - Dùng "$$" để Docker Compose không hiểu nhầm "$" là biến môi trường
       WORDPRESS_CONFIG_EXTRA: |
         define('WP_HOME', 'https://${SERVER_IP}');
         define('WP_SITEURL', 'https://${SERVER_IP}');
@@ -43,75 +64,84 @@ services:
           $$_SERVER['HTTPS'] = 'on';
         }
     volumes:
-      - wordpress_data:/var/www/html
+      - wordpress_data:/var/www/html      # Lưu mã nguồn, theme, plugin, ảnh upload
     networks:
       - app-network
+    # Không có "ports": WordPress chỉ truy cập được qua Nginx
 
+  # ---- phpMyAdmin: công cụ quản trị CSDL bằng giao diện web ----
   phpmyadmin:
     image: phpmyadmin:latest
     container_name: phpmyadmin
     restart: unless-stopped
     depends_on:
-      - mysql
+      - mysql                             # Chạy sau MySQL
     environment:
-      PMA_HOST: mysql
-      PMA_PORT: 3306
+      PMA_HOST: mysql                     # Máy chủ CSDL cần kết nối (tên service)
+      PMA_PORT: 3306                      # Cổng MySQL (nội bộ)
     ports:
-      - "8082:80"
+      - "8082:80"                         # Truy cập tại http://IP:8082 (host:container)
     security_opt:
       - no-new-privileges:true
     networks:
       - app-network
 
+  # ---- Nginx: reverse proxy, điểm vào duy nhất của website ----
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:1.27-alpine              # Bản alpine nhẹ
     container_name: nginx
     restart: unless-stopped
     depends_on:
       - wordpress
     ports:
-      - "80:80"
-      - "443:443"
+      - "80:80"                           # HTTP (được chuyển hướng 301 sang HTTPS)
+      - "443:443"                         # HTTPS
     volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro   # File cấu hình, :ro = chỉ đọc
+      - ./nginx/certs:/etc/nginx/certs:ro                        # Chứng chỉ SSL tự ký, chỉ đọc
     security_opt:
       - no-new-privileges:true
     networks:
       - app-network
 
+  # ===================================================================
+  # NHÓM 2: GIÁM SÁT (Prometheus + Grafana + các Exporter)
+  # ===================================================================
+
+  # ---- Prometheus: thu thập và lưu số liệu (mô hình Pull, mỗi 15 giây) ----
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
     restart: unless-stopped
     ports:
-      - "9090:9090"
+      - "9090:9090"                       # Giao diện Prometheus tại http://IP:9090
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro   # Khai báo các target cần thu thập
+      - prometheus_data:/prometheus       # Lưu cơ sở dữ liệu chuỗi thời gian (TSDB)
     command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=7d"
+      - "--config.file=/etc/prometheus/prometheus.yml"   # Đường dẫn file cấu hình
+      - "--storage.tsdb.path=/prometheus"                # Thư mục lưu dữ liệu
+      - "--storage.tsdb.retention.time=7d"               # Chỉ giữ số liệu 7 ngày
     security_opt:
       - no-new-privileges:true
     networks:
       - monitoring
 
+  # ---- Grafana: dashboard hiển thị số liệu và truy vấn log ----
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3000:3000"                       # Giao diện Grafana tại http://IP:3000
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
-      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_ADMIN_USER: admin                          # Tên đăng nhập quản trị
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD} # Mật khẩu mạnh lấy từ .env
+      GF_USERS_ALLOW_SIGN_UP: "false"                        # [Hardening] Tắt đăng ký tài khoản tự do
     volumes:
-      - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana                        # Lưu dữ liệu Grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro  # Tự nạp datasource (Prometheus, Loki)
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro  # Tự nạp dashboard "Monitoring Lab"
     security_opt:
       - no-new-privileges:true
     networks:
@@ -119,12 +149,13 @@ services:
     depends_on:
       - prometheus
 
+  # ---- cAdvisor: đo CPU, RAM, mạng của từng container ----
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:latest
     container_name: cadvisor
     restart: unless-stopped
-    privileged: true
-    volumes:
+    privileged: true                      # Cần quyền sâu để đọc cgroups (nên không bật no-new-privileges)
+    volumes:                              # Mount thư mục của host ở chế độ chỉ đọc để lấy số liệu
       - /:/rootfs:ro
       - /var/run:/var/run:ro
       - /sys:/sys:ro
@@ -132,93 +163,111 @@ services:
     networks:
       - monitoring
 
+  # ---- Node Exporter: đo CPU, RAM, ổ đĩa của máy chủ Ubuntu ----
   node-exporter:
     image: prom/node-exporter:latest
     container_name: node-exporter
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
-    volumes:
+    volumes:                              # Mount thông tin hệ thống của host, chỉ đọc
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/rootfs:ro
     command:
-      - "--path.procfs=/host/proc"
+      - "--path.procfs=/host/proc"        # Chỉ cho exporter biết nơi đọc /proc
       - "--path.sysfs=/host/sys"
       - "--path.rootfs=/rootfs"
     networks:
       - monitoring
 
+  # ---- MySQL Exporter: xuất số liệu của MySQL cho Prometheus ----
   mysql-exporter:
     image: prom/mysqld-exporter:latest
     container_name: mysql-exporter
     restart: unless-stopped
     environment:
-      MYSQLD_EXPORTER_PASSWORD: ${EXPORTER_PASSWORD}
+      MYSQLD_EXPORTER_PASSWORD: ${EXPORTER_PASSWORD}   # Mật khẩu tài khoản "exporter" (chỉ có quyền tối thiểu)
     command:
-      - "--mysqld.address=mysql:3306"
-      - "--mysqld.username=exporter"
+      - "--mysqld.address=mysql:3306"     # Địa chỉ MySQL cần đọc
+      - "--mysqld.username=exporter"      # [Hardening] Tài khoản riêng, chỉ SELECT/PROCESS/REPLICATION CLIENT
     security_opt:
       - no-new-privileges:true
     networks:
-      - app-network
-      - monitoring
+      - app-network                       # Gắn cả 2 mạng để làm "cầu nối":
+      - monitoring                        # đọc được MySQL (app-network), báo cho Prometheus (monitoring)
     depends_on:
       - mysql
 
+  # ---- Blackbox Exporter: kiểm tra website sống hay chết (probe HTTP/HTTPS) ----
   blackbox-exporter:
     image: prom/blackbox-exporter:latest
     container_name: blackbox-exporter
     restart: unless-stopped
     volumes:
-      - ./prometheus/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+      - ./prometheus/blackbox.yml:/etc/blackbox_exporter/config.yml:ro   # Định nghĩa module probe http_web
     command:
       - "--config.file=/etc/blackbox_exporter/config.yml"
     security_opt:
       - no-new-privileges:true
     networks:
-      - monitoring
-      - app-network
+      - monitoring                        # Gắn cả 2 mạng để probe được nginx/wordpress
+      - app-network                       # và báo kết quả cho Prometheus
     depends_on:
       - wordpress
 
+  # ===================================================================
+  # NHÓM 3: LOG TẬP TRUNG (Loki + Promtail)
+  # ===================================================================
+
+  # ---- Loki: nơi lưu trữ và đánh chỉ mục log (truy vấn bằng LogQL) ----
   loki:
     image: grafana/loki:2.9.8
     container_name: loki
     restart: unless-stopped
     volumes:
-      - ./loki/loki-config.yml:/etc/loki/loki-config.yaml:ro
-      - loki_data:/loki
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yaml:ro   # File cấu hình Loki
+      - loki_data:/loki                                        # Lưu dữ liệu log
     command:
       - "-config.file=/etc/loki/loki-config.yaml"
     security_opt:
       - no-new-privileges:true
     networks:
       - monitoring
+    # Không có "ports": chỉ Grafana và Promtail gọi tới Loki qua mạng nội bộ
+
+  # ---- Promtail: đọc log của các container rồi đẩy (push) về Loki ----
   promtail:
     image: grafana/promtail:2.9.8
     container_name: promtail
     restart: unless-stopped
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      - ./promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro                  # Hỏi Docker danh sách container, chỉ đọc
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro      # Nơi Docker ghi file log, chỉ đọc
+      - ./promtail/promtail-config.yml:/etc/promtail/config.yml:ro    # Cấu hình gắn nhãn và địa chỉ Loki
     command:
       - "-config.file=/etc/promtail/config.yml"
     networks:
       - monitoring
     depends_on:
       - loki
+    # Không bật no-new-privileges vì cần đọc docker.sock (đã nêu ở mục Residual Risks)
+
+# =====================================================================
+# MẠNG DOCKER
+# =====================================================================
 networks:
-  app-network:
+  app-network:                            # Mạng cho ứng dụng web và CSDL
     driver: bridge
-  monitoring:
+  monitoring:                             # Mạng riêng cho giám sát và log (tách biệt với app-network)
     driver: bridge
 
+# =====================================================================
+# VOLUME: lưu dữ liệu lâu dài, không mất khi container bị xóa hoặc tạo lại
+# =====================================================================
 volumes:
-  mysql_data:
-  wordpress_data:
-  prometheus_data:
-  grafana_data:
-  loki_data:
-
+  mysql_data:                             # Dữ liệu MySQL
+  wordpress_data:                         # Mã nguồn và nội dung WordPress
+  prometheus_data:                        # Số liệu giám sát
+  grafana_data:                           # Cấu hình và dữ liệu Grafana
+  loki_data:                              # Dữ liệu log
